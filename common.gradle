@@ -1,0 +1,317 @@
+buildscript {
+    repositories {
+        jcenter()
+    }
+
+    dependencies {
+        classpath 'com.bmuschko:gradle-docker-plugin:4.5.0'
+    }
+}
+
+configure(rootProject) {
+    if (hasProperty('teamcity') && !version.endsWith("-SNAPSHOT")) {
+        version = version + '.' + teamcity.get('build.number')
+    }
+
+    ext.gitHash = 'git log -1 --format=%H'.execute().text.trim()
+}
+
+subprojects {
+    version = rootProject.version
+    group = rootProject.group
+    ext.gitHash = rootProject.gitHash
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+        mavenLocal()
+        maven { url = 'https://oss.sonatype.org/content/repositories/snapshots/' }
+
+        maven {
+            url = 'https://nexus.soma.salesforce.com/nexus/content/repositories/releases/'
+            credentials {
+                username = "${nexus_user}"
+                password = "${nexus_password}"
+            }
+        }
+        maven {
+            url = 'https://nexus.soma.salesforce.com/nexus/content/repositories/scone-osgi-releases/'
+            credentials {
+                username = "${nexus_user}"
+                password = "${nexus_password}"
+            }
+        }
+        maven {
+            url = 'https://repo.sfiqautomation.com/artifactory/libs-release'
+            credentials {
+                username = "${artifactory_user}"
+                password = "${artifactory_password}"
+            }
+        }
+        maven {
+            url = 'https://repo.sfiqautomation.com/artifactory/libs-snapshot'
+            credentials {
+                username = "${artifactory_user}"
+                password = "${artifactory_password}"
+            }
+        }
+    }
+
+    afterEvaluate { memberProject ->
+        configure(memberProject) {
+
+            // Configure Java and/or Scala.
+            if (plugins.hasPlugin('java') || plugins.hasPlugin('java-library') || plugins.hasPlugin('scala') || plugins.hasPlugin('scala-library')) {
+
+                sourceCompatibility = '1.8'
+                targetCompatibility = '1.8'
+
+                task('sourcesJar', type: Jar, dependsOn: classes) {
+                    //noinspection GroovyAccessibility, GroovyAssignabilityCheck
+                    archiveClassifier = 'sources'
+                    if (sourceSets.main.hasProperty('allJava')) from sourceSets.main.allJava.srcDirs
+                    if (sourceSets.main.hasProperty('allScala')) from sourceSets.main.allScala.srcDirs
+                }
+
+                task('javadocJar', type: Jar) {
+                    //noinspection GroovyAccessibility, GroovyAssignabilityCheck
+                    archiveClassifier = 'javadoc'
+                    if (tasks.hasProperty('javadoc')) from javadoc.destinationDir
+                    if (tasks.hasProperty('scaladoc')) from scaladoc.destinationDir
+                }
+
+                artifacts {
+                    archives sourcesJar
+                    archives javadocJar
+                }
+
+                tasks.withType(JavaCompile) {
+                    options.debug = true
+                    options.encoding = 'UTF-8'
+                }
+
+                tasks.withType(Jar) {
+                    manifest {
+                        attributes(
+                                'Implementation-Title': project.description,
+                                'Implementation-Version': project.version,
+                                'Implementation-Vendor': project.group,
+                                'Source-Revision': gitHash
+                        )
+                    }
+                }
+
+                tasks.withType(Test) {
+                    jvmArgs '-Xmx1024m', "-Djava.library.path=${buildDir}/lib"
+                }
+
+                // Input libraries shouldn't define concrete log bindings. Leave that to the application.
+                configurations.findAll { !it.name.endsWith('Classpath') }.each { configuration ->
+                    configuration.dependencies.each { dependency ->
+                        if (dependency.getClass().getSimpleName().contains("ExternalModuleDependency")) {
+                            dependency.exclude group: 'org.slf4j', module: 'log4j-over-slf4j'
+                            dependency.exclude group: 'org.slf4j', module: 'slf4j-log4j12'
+                            dependency.exclude group: 'org.slf4j', module: 'jcl-over-slf4j'
+                            dependency.exclude group: 'ch.qos.logback', module: 'logback-classic'
+                        }
+                    }
+                }
+
+                // Make sure compile-only dependencies are NOT transitive. When they're transitive you can compile against
+                // an unexpected version of a transitive dependency.
+                configurations.findAll { (it.name == 'compileOnly') }.each { configuration ->
+                    configuration.dependencies.each {
+                        it.transitive = false
+                    }
+                }
+
+                // Configure Idea for javadoc and source download.
+                if (plugins.hasPlugin('idea')) {
+                    idea {
+                        module {
+                            downloadJavadoc = true
+                            downloadSources = true
+                            inheritOutputDirs = false
+
+                            // Match the newer gradle conventions
+                            if (sourceSets.main.hasProperty('allScala')) {
+                                outputDir = file("$buildDir/classes/scala/main")
+                                testOutputDir = file("$buildDir/classes/scala/test")
+
+                            } else if (sourceSets.main.hasProperty('allJava')) {
+                                outputDir = file("$buildDir/classes/java/main")
+                                testOutputDir = file("$buildDir/classes/java/test")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Configure standard publication.
+            if (plugins.hasPlugin('maven-publish')) {
+                publishing {
+                    repositories {
+                        if (version.endsWith('SNAPSHOT')) {
+                            maven {
+                                name = 'libs-snapshot'
+                                url = artifactory_contextUrl + '/libs-snapshot-local'
+                                credentials {
+                                    username = "${artifactory_user}"
+                                    password = "${artifactory_password}"
+                                }
+                            }
+                        } else {
+                            maven {
+                                name = 'libs-release'
+                                url = artifactory_contextUrl + '/libs-release-local'
+                                credentials {
+                                    username = "${artifactory_user}"
+                                    password = "${artifactory_password}"
+                                }
+                            }
+                        }
+                    }
+                    if (sourceSets.main.allJava) {
+                        publications {
+                            mavenJava(MavenPublication) {
+                                from components.java
+
+                                artifact sourcesJar
+                                artifact javadocJar
+
+                                pom {
+                                    name = project.name
+                                    description = project.description
+                                    packaging = 'jar'
+                                    url = 'https://github.salesforceiq.com/SalesforceIQ/' + rootProject.name
+                                    organization {
+                                        name = 'SalesforceIQ'
+                                        url = 'https://github.salesforceiq.com/SalesforceIQ'
+                                    }
+                                    scm {
+                                        url = 'git@github.salesforceiq.com:SalesforceIQ/' + rootProject.name + '.git'
+                                        connection = 'scm:git@github.salesforceiq.com:SalesforceIQ/' + rootProject.name + '.git'
+                                        developerConnection = 'scm:git:git@github.salesforceiq.com:SalesforceIQ/' + rootProject.name + '.git'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Configure Artifactory publication.
+            if (plugins.hasPlugin('com.jfrog.artifactory') && plugins.hasPlugin('maven-publish')) {
+                artifactory {
+                    contextUrl = "${artifactory_contextUrl}"
+                    publish {
+                        repository {
+                            repoKey = "libs-${project.version.endsWith('-SNAPSHOT') ? 'snapshot' : 'release'}-local"
+                            username = artifactory_user
+                            password = artifactory_password
+                        }
+                        defaults {
+                            publications('mavenJava')
+                            publishIvy = false
+                        }
+                    }
+                }
+            }
+
+            // Configure docker access.
+            if (plugins.hasPlugin('com.bmuschko.docker-remote-api') && plugins.hasPlugin('application')) {
+
+                task('createDockerfile', type: com.bmuschko.gradle.docker.tasks.image.Dockerfile) {
+                    group 'docker-private'
+
+                    from 'openjdk:8u181-jre-slim'
+                    workingDir('/app')
+                    entryPoint('bin/' + applicationName)
+
+                    doFirst {
+                        destDir.get().asFileTree.visit { details ->
+                            if (details.isDirectory) {
+                                copyFile(details.relativePath.pathString, details.relativePath.pathString + '/')
+                            }
+                        }
+                    }
+                }
+
+                task('stageDockerContent', type: Sync) {
+                    group 'docker-private'
+                    dependsOn assembleDist
+
+                    into createDockerfile.destDir
+                    //noinspection GroovyAssignabilityCheck
+                    with project.distributions.main.contents
+                }
+                tasks.getByName('createDockerfile').dependsOn stageDockerContent
+
+                task('buildDockerImage', type: com.bmuschko.gradle.docker.tasks.image.DockerBuildImage) {
+                    group 'docker-private'
+                    dependsOn createDockerfile
+
+                    tags.add(applicationName + ':' + version)
+                }
+
+                task('createDockerContainer', type: com.bmuschko.gradle.docker.tasks.container.DockerCreateContainer) {
+                    group 'docker-private'
+                    dependsOn buildDockerImage
+
+                    imageId = buildDockerImage.imageId
+                    containerName = applicationName
+                    cmd = run.args
+                }
+
+                task('dockerStart', type: com.bmuschko.gradle.docker.tasks.container.DockerStartContainer) {
+                    group 'docker'
+
+                    containerId = applicationName
+                }
+
+                task('dockerStop', type: com.bmuschko.gradle.docker.tasks.container.DockerStopContainer) {
+                    group 'docker'
+
+                    containerId = applicationName
+
+                    onError { exception ->
+                        if (exception.toString().contains('NotModifiedException')) {
+                            return // Ignore exception when container already stopped
+                        } else if (exception.message.contains('No such container')) {
+                            return // Ignore exception when container doesn't exist
+                        } else {
+                            throw exception
+                        }
+                    }
+                }
+
+                // Creates and starts the docker container. The term "up" comes from docker-compose.
+                task('dockerUp', type: Task) {
+                    group 'docker'
+                    dependsOn createDockerContainer, dockerStart
+                }
+
+                // Stops and removes the docker container.  The term "down" comes from docker-compose.
+                task('dockerDown', type: com.bmuschko.gradle.docker.tasks.container.DockerRemoveContainer) {
+                    group 'docker'
+                    dependsOn dockerStop
+
+                    containerId = applicationName
+
+                    onError { exception ->
+                        if (exception.message.contains('No such container')) {
+                            return // Ignore exception when container doesn't exist
+                        } else {
+                            throw exception
+                        }
+                    }
+                }
+
+                // Establish execution precedence when multiple tasks requested together.
+                dockerDown.mustRunAfter dockerStop
+                dockerStart.mustRunAfter createDockerContainer, dockerStop, dockerDown //, dockerUpdateConfig
+            }
+        }
+    }
+}

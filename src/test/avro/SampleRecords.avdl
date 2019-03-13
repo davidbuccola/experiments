@@ -1,0 +1,27 @@
+/**
+ * Protocol with sample data records.
+ */
+@namespace("dbuccola.experiments.avro")
+protocol SampleRecords {
+
+    record SampleNestedRecord {
+        union {boolean, null} optionalBoolean;
+        union {double, null} optionalDouble;
+        union {long, null} optionalLong;
+        union {string, null} optionalString;
+        union {bytes, null} optionalBytes;
+    }
+
+    record SampleRecord {
+        string requiredString;
+        array<SampleNestedRecord> nestedRecords = [];
+    }
+
+    @aliases(["SampleRecord"])
+    record CompatibleSampleRecord {
+        string requiredString;
+        array<SampleNestedRecord> nestedRecords = [];
+        union { null, string} optionalString = null;
+        boolean requiredBooleanWithDefault = false;
+    }
+}
